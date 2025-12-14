@@ -1,0 +1,8 @@
+pandas
+requests
+openpyxl
+scikit-learn
+matplotlib
+seaborn
+numpy
+azure-functions
