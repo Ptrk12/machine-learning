@@ -9,35 +9,36 @@ from tensorflow.keras.layers import LSTM, Dense, Bidirectional, Dropout, Input
 from tensorflow.keras.callbacks import EarlyStopping
 
 CONFIG = {
-    'csv_path': '../data/merged_data.csv',       
-    'time_steps': 24,             
-    'test_split': 0.2,            
-    'epochs': 50,                 
+    'csv_path': '../data/merged_data.csv',
+    'time_steps': 24,
+    'test_split': 0.2,
+    'epochs': 50,
     'batch_size': 32,
-    'patience': 5                 
+    'patience': 5
 }
 
 def load_and_process_data(csv_path, time_steps):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"File not found: {csv_path}")
 
-    df = pd.read_csv(csv_path)
-    cols = ['PM2.5', 'PM10', 'temp_c', 'humidity_percent', 'pressure_hpa']
+    # POPRAWKA 1: low_memory=False usuwa ostrzeżenie o mieszanych typach
+    df = pd.read_csv(csv_path, low_memory=False)
     
+    cols = ['PM25', 'PM10', 'temp_c', 'humidity_percent', 'pressure_hpa']
+    
+    # Konwersja na liczby (zamienia błędy na NaN)
     for col in cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
     initial_len = len(df)
     df.dropna(subset=cols, inplace=True)
-    cleaned_len = len(df)
-    print(f"Data cleaning: Dropped {initial_len - cleaned_len} rows with NaN values.")
-
-    if cleaned_len == 0:
+    
+    if len(df) == 0:
         raise ValueError("Error: All data was dropped! Check your CSV file format.")
-    # ----------------------------------
 
     if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # POPRAWKA 2: format='mixed' radzi sobie z ".000" i różnymi formatami dat
+        df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed')
         df.sort_values('timestamp', inplace=True)
         
     data_values = df[cols].values.astype('float32')
@@ -51,7 +52,6 @@ def load_and_process_data(csv_path, time_steps):
         y.append(scaled_data[i + time_steps])  
 
     return np.array(X), np.array(y), scaler, cols
-
 
 def split_data(X, y, split_ratio):
     train_size = int(len(X) * (1 - split_ratio))
@@ -100,7 +100,6 @@ def train_model(model, X_train, y_train, X_test, y_test, config):
     return history
 
 if __name__ == "__main__":
-    print("--- 1. Loading data ---")
     try:
         X, y, scaler, cols = load_and_process_data(CONFIG['csv_path'], CONFIG['time_steps'])
         X_train, y_train, X_test, y_test = split_data(X, y, CONFIG['test_split'])
@@ -114,7 +113,6 @@ if __name__ == "__main__":
         history_lstm = train_model(lstm_model, X_train, y_train, X_test, y_test, CONFIG)
         history_bilstm = train_model(bilstm_model, X_train, y_train, X_test, y_test, CONFIG)
 
-        print("\n--- 4. Generating comparison plot ---")
         plt.figure(figsize=(10, 5))
         plt.plot(history_lstm.history['val_loss'], label='LSTM Val Loss', linestyle='--')
         plt.plot(history_bilstm.history['val_loss'], label='Bi-LSTM Val Loss', linestyle='-')
@@ -135,7 +133,6 @@ if __name__ == "__main__":
         scaler_filename = 'scaler.pkl'
         joblib.dump(scaler, scaler_filename)
         print(f"Scaler saved as: {scaler_filename}")
-        
 
     except Exception as e:
         print(f"ERROR: {e}")
