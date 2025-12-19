@@ -8,3 +8,6 @@ numpy
 azure-functions
 tensorflow
 keras
+google-cloud-firestore
+google-auth
+pyodbc
