@@ -25,6 +25,7 @@ local.settings.json
 node_modules
 dist
 
+firebase_key.json
 # Local python packages
 .python_packages/
 
