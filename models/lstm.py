@@ -4,8 +4,9 @@ import matplotlib.pyplot as plt
 import joblib
 import os
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Bidirectional, Dropout, Input
+from sklearn.ensemble import RandomForestRegressor
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import LSTM, Dense, Bidirectional, Dropout, Input, Attention, GlobalAveragePooling1D
 from tensorflow.keras.callbacks import EarlyStopping
 
 CONFIG = {
@@ -21,23 +22,19 @@ def load_and_process_data(csv_path, time_steps):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"File not found: {csv_path}")
 
-    # POPRAWKA 1: low_memory=False usuwa ostrzeżenie o mieszanych typach
     df = pd.read_csv(csv_path, low_memory=False)
     
     cols = ['PM25', 'PM10', 'temp_c', 'humidity_percent', 'pressure_hpa']
     
-    # Konwersja na liczby (zamienia błędy na NaN)
     for col in cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    initial_len = len(df)
     df.dropna(subset=cols, inplace=True)
     
     if len(df) == 0:
         raise ValueError("Error: All data was dropped! Check your CSV file format.")
 
     if 'timestamp' in df.columns:
-        # POPRAWKA 2: format='mixed' radzi sobie z ".000" i różnymi formatami dat
         df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed')
         df.sort_values('timestamp', inplace=True)
         
@@ -49,7 +46,7 @@ def load_and_process_data(csv_path, time_steps):
     X, y = [], []
     for i in range(len(scaled_data) - time_steps):
         X.append(scaled_data[i : i + time_steps])
-        y.append(scaled_data[i + time_steps])  
+        y.append(scaled_data[i + time_steps])   
 
     return np.array(X), np.array(y), scaler, cols
 
@@ -81,6 +78,18 @@ def build_bilstm_model(input_shape, n_outputs):
     model.compile(optimizer='adam', loss='mse', metrics=['mae'])
     return model
 
+def build_attention_lstm_model(input_shape, n_outputs):
+    inputs = Input(shape=input_shape)
+    lstm_out = LSTM(64, return_sequences=True)(inputs)
+    attention_out = Attention()([lstm_out, lstm_out])
+    pooled_out = GlobalAveragePooling1D()(attention_out)
+    dropout = Dropout(0.2)(pooled_out)
+    outputs = Dense(n_outputs)(dropout)
+    
+    model = Model(inputs=inputs, outputs=outputs, name="Attention_LSTM")
+    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+    return model
+
 def train_model(model, X_train, y_train, X_test, y_test, config):
     early_stop = EarlyStopping(
         monitor='val_loss', 
@@ -109,13 +118,23 @@ if __name__ == "__main__":
 
         lstm_model = build_lstm_model(input_shape, n_outputs)
         bilstm_model = build_bilstm_model(input_shape, n_outputs)
+        attn_lstm_model = build_attention_lstm_model(input_shape, n_outputs)
 
         history_lstm = train_model(lstm_model, X_train, y_train, X_test, y_test, CONFIG)
         history_bilstm = train_model(bilstm_model, X_train, y_train, X_test, y_test, CONFIG)
+        history_attn = train_model(attn_lstm_model, X_train, y_train, X_test, y_test, CONFIG)
+
+        print("Starting training for Random Forest Regressor")
+        X_train_flat = X_train.reshape(X_train.shape[0], -1)
+        X_test_flat = X_test.reshape(X_test.shape[0], -1)
+        
+        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        rf_model.fit(X_train_flat, y_train)
 
         plt.figure(figsize=(10, 5))
         plt.plot(history_lstm.history['val_loss'], label='LSTM Val Loss', linestyle='--')
         plt.plot(history_bilstm.history['val_loss'], label='Bi-LSTM Val Loss', linestyle='-')
+        plt.plot(history_attn.history['val_loss'], label='Attn-LSTM Val Loss', linestyle='-.')
         plt.title('Validation Loss Comparison (MSE)')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
@@ -129,6 +148,14 @@ if __name__ == "__main__":
         bilstm_filename = 'bilstm_model.keras'
         bilstm_model.save(bilstm_filename)
         print(f"Bidirectional LSTM saved as: {bilstm_filename}")
+
+        attn_filename = 'attn_lstm_model.keras'
+        attn_lstm_model.save(attn_filename)
+        print(f"Attention LSTM saved as: {attn_filename}")
+
+        rf_filename = 'rf_model.pkl'
+        joblib.dump(rf_model, rf_filename)
+        print(f"Random Forest saved as: {rf_filename}")
 
         scaler_filename = 'scaler.pkl'
         joblib.dump(scaler, scaler_filename)
