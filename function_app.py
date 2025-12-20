@@ -1,3 +1,9 @@
+import os
+import sys
+import types
+if '__main__' not in sys.modules:
+    sys.modules['__main__'] = types.ModuleType('__main__')
+
 import azure.functions as func
 import json
 import numpy as np
@@ -5,7 +11,7 @@ import pandas as pd
 import joblib
 import tensorflow as tf
 import requests
-import os
+
 import logging
 import pyodbc
 from datetime import datetime, timedelta, timezone
@@ -100,7 +106,7 @@ def get_device_location_sql(device_id):
     try:
         with pyodbc.connect(conn_str, timeout=5) as conn:
             cursor = conn.cursor()
-            query = "SELECT Latitude, Longitude FROM Devices WHERE DeviceId = ?"
+            query = "SELECT Latitude, Longitude FROM Devices WHERE Id = ?"
             cursor.execute(query, device_id)
             row = cursor.fetchone()
             
@@ -125,7 +131,7 @@ def get_firestore_data(device_id, required_hours=24):
         cutoff_timestamp = int(cutoff_time.timestamp())
 
         docs = db.collection('devices')\
-                 .document(device_id)\
+                 .document('885721b19848')\
                  .collection('measurements')\
                  .where('timestamp', '>=', cutoff_timestamp)\
                  .stream()
@@ -170,7 +176,6 @@ def fetch_hybrid_data(device_id):
     df_firestore = get_firestore_data(device_id)
     
     has_device_data = df_firestore is not None and not df_firestore.empty
-
     if has_device_data:
         logging.info("Device data detected. Attempting to fetch coordinates from SQL...")
         sql_coords = get_device_location_sql(device_id)
