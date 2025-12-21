@@ -3,7 +3,6 @@ import sys
 import types
 if '__main__' not in sys.modules:
     sys.modules['__main__'] = types.ModuleType('__main__')
-
 import azure.functions as func
 import json
 import numpy as np
@@ -11,17 +10,17 @@ import pandas as pd
 import joblib
 import tensorflow as tf
 import requests
-
 import logging
-import pyodbc
-from datetime import datetime, timedelta, timezone
-from google.cloud import firestore
-from google.oauth2 import service_account
+from datetime import  timedelta
+from sql.sql_repository import get_device_location, get_serial_number_by_device_id
+from firebase.firestore_repository import get_device_measurements
 
 app = func.FunctionApp()
 
 lstm_model = None
 bilstm_model = None
+attn_lstm_model = None
+rf_model = None
 scaler = None
 
 COLUMNS = ['PM25', 'PM10', 'temp_c', 'humidity_percent', 'pressure_hpa']
@@ -38,7 +37,7 @@ DEFAULT_LAT = 50.0647
 DEFAULT_LON = 19.9450
 
 def load_artifacts():
-    global lstm_model, bilstm_model, scaler
+    global lstm_model, bilstm_model, scaler, attn_lstm_model, rf_model
     base_path = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(base_path, "models")
 
@@ -53,142 +52,34 @@ def load_artifacts():
     if bilstm_model is None:
         bilstm_model = tf.keras.models.load_model(os.path.join(models_dir, "bilstm_model.keras"))
         logging.info("Bi-LSTM model loaded successfully.")
-
-def get_firestore_client():
-    env_val = os.environ.get("FIREBASE_CREDENTIALS_JSON")
-    
-    if not env_val:
-        logging.error("Missing variable: FIREBASE_CREDENTIALS_JSON")
-        return None
-    
-    full_config = None
-
-    # STRATEGIA 1: Sprawdź czy to ścieżka do pliku
-    if os.path.exists(env_val):
-        try:
-            with open(env_val, 'r') as f:
-                full_config = json.load(f)
-            logging.info(f"Loaded credentials from file: {env_val}")
-        except Exception as e:
-            logging.error(f"Error reading file {env_val}: {e}")
-            return None
-    
-    else:
-        try:
-            full_config = json.loads(env_val)
-        except Exception:
-            logging.error("FIREBASE_CREDENTIALS_JSON is missing")
-            return None
-
-    try:
-        if "Firebase" in full_config:
-            creds_dict = full_config["Firebase"]
-        else:
-            creds_dict = full_config
-
-        credentials = service_account.Credentials.from_service_account_info(creds_dict)
-        return firestore.Client(credentials=credentials)
-    except Exception as e:
-        logging.error(f"Auth Error: {e}")
-        return None
-
-def get_device_location_sql(device_id):
-    server = os.environ.get("SQL_SERVER", "localhost")
-    database = os.environ.get("SQL_DATABASE", "Master")
-    
-    conn_str = (
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        "Trusted_Connection=yes;"
-    )
-
-    try:
-        with pyodbc.connect(conn_str, timeout=5) as conn:
-            cursor = conn.cursor()
-            query = "SELECT Latitude, Longitude FROM Devices WHERE Id = ?"
-            cursor.execute(query, device_id)
-            row = cursor.fetchone()
-            
-            if row and row.Latitude is not None and row.Longitude is not None:
-                logging.info(f"SQL: Found coordinates for device {device_id}: {row.Latitude}, {row.Longitude}")
-                return float(row.Latitude), float(row.Longitude)
-            
-            logging.warning(f"SQL: Device {device_id} not found or coordinates missing.")
-            return None
-            
-    except Exception as e:
-        logging.error(f"SQL Connection Error: {e}")
-        return None
-
-def get_firestore_data(device_id, required_hours=24):
-    try:
-        db = get_firestore_client()
-        if not db:
-            return None
-
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=required_hours + 2)
-        cutoff_timestamp = int(cutoff_time.timestamp())
-
-        docs = db.collection('devices')\
-                 .document('885721b19848')\
-                 .collection('measurements')\
-                 .where('timestamp', '>=', cutoff_timestamp)\
-                 .stream()
-
-        data_rows = []
-        for doc in docs:
-            d = doc.to_dict()
-            ts_val = d.get('timestamp')
-            if not ts_val: continue
-            
-            row = {'timestamp': pd.to_datetime(ts_val, unit='s')}
-            params = d.get('parameters', [])
-            if isinstance(params, list):
-                for param_map in params:
-                    for key, val in param_map.items():
-                        if key in COLUMN_MAPPING:
-                            row[COLUMN_MAPPING[key]] = val
-            
-            if len(row) > 1:
-                data_rows.append(row)
-
-        if not data_rows:
-            return None
-
-        df = pd.DataFrame(data_rows)
-        for col in COLUMNS:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df['timestamp'] = df['timestamp'].dt.floor('h')
-        df_grouped = df.groupby('timestamp')[COLUMNS].mean()
         
-        return df_grouped
+    if attn_lstm_model is None:
+        attn_lstm_model = tf.keras.models.load_model(os.path.join(models_dir, "attn_lstm_model.keras"))
+        logging.info("Attention LSTM model loaded successfully.")
 
-    except Exception as e:
-        logging.error(f"Firestore Error: {e}")
-        return None
+    if rf_model is None:
+        rf_model = joblib.load(os.path.join(models_dir, "rf_model.pkl"))
+        logging.info("Random Forest model loaded successfully.")
+
 
 def fetch_hybrid_data(device_id):
-
-    logging.info(f"Checking for device data in Firestore for ID: {device_id}")
-    df_firestore = get_firestore_data(device_id)
+    device_serial_number = get_serial_number_by_device_id(device_id)
     
-    has_device_data = df_firestore is not None and not df_firestore.empty
+    if device_serial_number is None:
+        raise ValueError(f"Device ID {device_id} not found in SQL database.")
+    
+    logging.info(f"Checking for device data in Firestore for ID: {device_id}")
+    df_device = get_device_measurements(device_serial_number)
+    
+    has_device_data = df_device is not None and not df_device.empty
+    
     if has_device_data:
-        logging.info("Device data detected. Attempting to fetch coordinates from SQL...")
-        sql_coords = get_device_location_sql(device_id)
-        
-        if sql_coords:
-            lat, lon = sql_coords
-            logging.info(f"Using SQL Device Coordinates: {lat}, {lon}")
-        else:
-            lat, lon = DEFAULT_LAT, DEFAULT_LON
-            logging.warning(f"SQL lookup failed. Fallback to default coordinates: {lat}, {lon}")
+        logging.info("Device data detected")
+        sql_coords = get_device_location(device_id)
+        lat, lon = sql_coords if sql_coords else (DEFAULT_LAT, DEFAULT_LON)
     else:
         lat, lon = DEFAULT_LAT, DEFAULT_LON
-        logging.info(f"No device data found. Using Default Krakow Coordinates: {lat}, {lon}")
+        logging.info("No device data found. Using default coordinates.")
 
     url_air = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm10,pm2_5&past_days=2"
     url_weather = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,surface_pressure&past_days=2"
@@ -207,22 +98,21 @@ def fetch_hybrid_data(device_id):
         s_pres = pd.Series(r_weather['hourly']['surface_pressure'], index=pd.to_datetime(r_weather['hourly']['time']), name='pressure_hpa')
 
         df_api = pd.concat([s_pm25, s_pm10, s_temp, s_hum, s_pres], axis=1)
-        df_api.index = df_api.index.tz_localize(None)
+        df_api.index = df_api.index.tz_localize(None) # Usuwamy strefę czasową dla zgodności
+        df_api.sort_index(inplace=True)
+
+        current_time = pd.Timestamp.utcnow().tz_localize(None)
         
         if has_device_data:
-            if df_firestore.index.tz is not None:
-                df_firestore.index = df_firestore.index.tz_localize(None)
-            
-            logging.info("Merging Firestore data into API data.")
-            df_api.update(df_firestore)
+            df_combined = df_device.combine_first(df_api)
+        else:
+            df_combined = df_api
 
-        df_api.sort_index(inplace=True)
-        current_time = pd.Timestamp.now()
-        df_final = df_api[df_api.index <= current_time].tail(24)
+        df_final = df_combined[df_combined.index <= current_time].tail(24)
         df_final = df_final.ffill().bfill()
 
         if len(df_final) < 24:
-            raise ValueError(f"Insufficient data. Found {len(df_final)}")
+            raise ValueError(f"Insufficient data. Found {len(df_final)} rows after merge.")
         
         return df_final[COLUMNS].values, df_final.index[-1]
         
@@ -234,11 +124,20 @@ def fetch_hybrid_data(device_id):
 def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
     try:
         load_artifacts()
+        selected_model = None
+        
         model_type = req.params.get('model', 'lstm').lower()
         device_id = req.params.get('deviceId')
         hours_to_predict = int(req.params.get('hours', 24))
-        
-        selected_model = bilstm_model if 'bi' in model_type else lstm_model
+                        
+        if model_type == 'bilstm':
+            selected_model = bilstm_model
+        elif model_type == 'lstm':
+            selected_model = lstm_model
+        elif model_type == 'attn_lstm':
+            selected_model = attn_lstm_model
+        elif model_type == 'rf':
+            selected_model = rf_model
         
         raw_data, last_time = fetch_hybrid_data(device_id)
         

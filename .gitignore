@@ -38,6 +38,10 @@ ENV/
 env.bak/
 venv.bak/
 
+#models
+models/*.keras
+models/*.pkl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
