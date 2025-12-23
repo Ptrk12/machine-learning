@@ -33,9 +33,6 @@ COLUMN_MAPPING = {
     'pm10': 'PM10'
 }
 
-DEFAULT_LAT = 50.0647
-DEFAULT_LON = 19.9450
-
 def load_artifacts():
     global lstm_model, bilstm_model, scaler, attn_lstm_model, rf_model
     base_path = os.path.dirname(os.path.abspath(__file__))
@@ -73,13 +70,8 @@ def fetch_hybrid_data(device_id):
     
     has_device_data = df_device is not None and not df_device.empty
     
-    if has_device_data:
-        logging.info("Device data detected")
-        sql_coords = get_device_location(device_id)
-        lat, lon = sql_coords if sql_coords else (DEFAULT_LAT, DEFAULT_LON)
-    else:
-        lat, lon = DEFAULT_LAT, DEFAULT_LON
-        logging.info("No device data found. Using default coordinates.")
+    sql_coords = get_device_location(device_id)
+    lat, lon = sql_coords 
 
     url_air = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm10,pm2_5&past_days=2"
     url_weather = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,surface_pressure&past_days=2"
@@ -120,7 +112,7 @@ def fetch_hybrid_data(device_id):
         logging.error(f"Process Error: {e}")
         raise e
 
-@app.route(route="predict_pollution", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="predict_pollution", auth_level=func.AuthLevel.FUNCTION)
 def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
     try:
         load_artifacts()
@@ -129,7 +121,7 @@ def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
         model_type = req.params.get('model', 'lstm').lower()
         device_id = req.params.get('deviceId')
         hours_to_predict = int(req.params.get('hours', 24))
-                        
+                                
         if model_type == 'bilstm':
             selected_model = bilstm_model
         elif model_type == 'lstm':
@@ -147,8 +139,17 @@ def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
         predictions_scaled = []
         future_timestamps = []
 
+        is_keras_model = isinstance(selected_model, tf.keras.Model)
+
         for _ in range(hours_to_predict):
-            next_pred = selected_model.predict(current_batch, verbose=0)
+            if is_keras_model:
+                next_pred = selected_model.predict(current_batch, verbose=0)
+            else:
+                rf_input = current_batch.reshape(current_batch.shape[0], -1)
+                next_pred = selected_model.predict(rf_input)
+                if next_pred.ndim == 1:
+                    next_pred = next_pred.reshape(1, -1)
+
             predictions_scaled.append(next_pred[0])
             last_time += timedelta(hours=1)
             future_timestamps.append(last_time.isoformat())
@@ -170,7 +171,7 @@ def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
             })
 
         return func.HttpResponse(json.dumps({
-            "model": "Bi-LSTM" if 'bi' in model_type else "LSTM",
+            "model": model_type.upper(),
             "hours": hours_to_predict,
             "predictions": results
         }), mimetype="application/json")
