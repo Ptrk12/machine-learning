@@ -59,7 +59,7 @@ def load_artifacts():
         logging.info("Random Forest model loaded successfully.")
 
 
-def fetch_hybrid_data(device_id):
+def fetch_hybrid_data(device_id, take_device_data):
     device_serial_number = get_serial_number_by_device_id(device_id)
     
     if device_serial_number is None:
@@ -68,7 +68,8 @@ def fetch_hybrid_data(device_id):
     logging.info(f"Checking for device data in Firestore for ID: {device_id}")
     df_device = get_device_measurements(device_serial_number)
     
-    has_device_data = df_device is not None and not df_device.empty
+    has_device_data = df_device is not None and not df_device.empty and take_device_data
+    
     
     sql_coords = get_device_location(device_id)
     lat, lon = sql_coords 
@@ -97,8 +98,10 @@ def fetch_hybrid_data(device_id):
         
         if has_device_data:
             df_combined = df_device.combine_first(df_api)
+            logging.info('combined with device data')
         else:
             df_combined = df_api
+            logging.info('combined with ony api data')
 
         df_final = df_combined[df_combined.index <= current_time].tail(24)
         df_final = df_final.ffill().bfill()
@@ -121,6 +124,9 @@ def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
         model_type = req.params.get('model', 'lstm').lower()
         device_id = req.params.get('deviceId')
         hours_to_predict = int(req.params.get('hours', 24))
+        merge_param = req.params.get('mergeWithDeviceData')
+        
+        take_device_data = merge_param.lower() == 'true'
                                 
         if model_type == 'bilstm':
             selected_model = bilstm_model
@@ -131,7 +137,7 @@ def predict_pollution(req: func.HttpRequest) -> func.HttpResponse:
         elif model_type == 'rf':
             selected_model = rf_model
         
-        raw_data, last_time = fetch_hybrid_data(device_id)
+        raw_data, last_time = fetch_hybrid_data(device_id,take_device_data)
         
         current_input_scaled = scaler.transform(raw_data)
         current_batch = np.expand_dims(current_input_scaled, axis=0)
