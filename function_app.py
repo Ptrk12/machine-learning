@@ -91,7 +91,7 @@ def fetch_hybrid_data(device_id, take_device_data):
         s_pres = pd.Series(r_weather['hourly']['surface_pressure'], index=pd.to_datetime(r_weather['hourly']['time']), name='pressure_hpa')
 
         df_api = pd.concat([s_pm25, s_pm10, s_temp, s_hum, s_pres], axis=1)
-        df_api.index = df_api.index.tz_localize(None) # Usuwamy strefę czasową dla zgodności
+        df_api.index = df_api.index.tz_localize(None) 
         df_api.sort_index(inplace=True)
 
         current_time = pd.Timestamp.utcnow().tz_localize(None)
