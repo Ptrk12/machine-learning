@@ -17,7 +17,8 @@ project.lock.json
 /tools/NuGet.exe
 /App_Data
 /secrets
-/data
+/data/*
+!/data/prepare_data.py
 .secrets
 appsettings.json
 local.settings.json
